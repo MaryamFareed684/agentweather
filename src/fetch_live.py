@@ -115,8 +115,14 @@ def get_aqicn_data():
 
     data = fetch_json("aqicn", url, params)
 
-    if data and data.get("status") != "ok":
-        print("AQICN returned an unsuccessful response.")
+    if data is None:
+        return None
+
+    # Honest check: the real AQI value must be inside the reply
+    inner = data.get("data")
+
+    if not isinstance(inner, dict) or "aqi" not in inner:
+        print("AQICN failed:", inner)
         return None
 
     return data
@@ -146,6 +152,29 @@ def get_openmeteo_weather():
     }
 
     return fetch_json("openmeteo_weather", url, params)
+# 5. Open-Meteo current air quality
+def get_openmeteo_air_quality():
+
+    url = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+    params = {
+        "latitude": LATITUDE,
+        "longitude": LONGITUDE,
+        "current": "us_aqi,pm2_5,pm10",
+        "timezone": "GMT"
+    }
+
+    data = fetch_json("openmeteo_airquality", url, params)
+
+    # Honest check: the real AQI value must be inside the reply
+    if data is None:
+        return None
+
+    if "us_aqi" not in data.get("current", {}):
+        print("Open-Meteo air quality: AQI value is missing.")
+        return None
+
+    return data
 
 
 # Run all four functions
@@ -164,6 +193,9 @@ if __name__ == "__main__":
 
     print("\n4. Fetching Open-Meteo weather...")
     meteo = get_openmeteo_weather()
+    
+    print("\n5. Fetching Open-Meteo air quality...")
+    air = get_openmeteo_air_quality()
 
     print("\n===== FETCH SUMMARY =====")
 
@@ -171,5 +203,6 @@ if __name__ == "__main__":
     print("OpenWeather pollution:", "Success" if pollution else "Failed")
     print("AQICN:", "Success" if aqi else "Failed")
     print("Open-Meteo:", "Success" if meteo else "Failed")
+    print("Open-Meteo air quality:", "Success" if air else "Failed")
 
     print("\nData collection completed.")

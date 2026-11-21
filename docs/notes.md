@@ -1,38 +1,37 @@
+# Week 1 Notes
 
-# AgentWeather - Data Source Notes
+## City
+Peshawar (lat 34.01, lon 71.58). Times are in UTC everywhere.
 
-## 1. Data Sources
+## Source to metric table
 
-| Metric | Source | Field Name | Unit |
+| Metric | Source | Field | Unit |
 |---|---|---|---|
-| Temperature | OpenWeather | main.temp | °C |
-| Feels Like Temperature | OpenWeather | main.feels_like | °C |
-| Humidity | OpenWeather | main.humidity | % |
-| Pressure | OpenWeather | main.pressure | hPa |
-| Wind Speed | OpenWeather | wind.speed | m/s |
-| Air Quality Index | OpenWeather | list[0].main.aqi | 1-5 |
-| PM2.5 | OpenWeather | list[0].components.pm2_5 | µg/m³ |
-| Temperature | Open-Meteo | current.temperature_2m | °C |
-| Humidity | Open-Meteo | current.relative_humidity_2m | % |
-| Wind Speed | Open-Meteo | current.wind_speed_10m | km/h |
-| Air Quality Index | AQICN | To verify from response | AQI scale |
+| Temperature | OpenWeather weather | main.temp | °C (units=metric) |
+| Temperature | Open-Meteo current | current.temperature_2m | °C |
+| Humidity | OpenWeather weather | main.humidity | % |
+| Humidity | Open-Meteo current | current.relative_humidity_2m | % |
+| Precipitation | OpenWeather weather | rain.1h (only present when raining) | mm |
+| Precipitation | Open-Meteo current | current.precipitation | mm |
+| Wind speed | OpenWeather weather | wind.speed | m/s |
+| Wind speed | Open-Meteo current | current.wind_speed_10m | km/h |
+| Wind direction | OpenWeather weather | wind.deg | degrees |
+| Wind direction | Open-Meteo current | current.wind_direction_10m | degrees |
+| UV index | Open-Meteo history (air quality API) | hourly.uv_index | index |
+| AQI | Open-Meteo air quality |
 
-## 2. Overlaps
 
-- OpenWeather and Open-Meteo both provide temperature.
-- OpenWeather and AQICN provide air-quality information.
-- OpenWeather AQI uses a 1-5 scale.
-- AQICN AQI uses a 0-500 scale.
-- These AQI scales should not be mixed directly.
 
-## 3. Data Gaps
-
-- Rain probability needs to be checked.
-- UV Index needs to be checked.
-- Open-Meteo can provide these metrics through additional forecast parameters.
-
-## 4. Data Storage
-
-Raw API responses are stored in data/raw/.
-
-All collection timestamps use UTC.
+## Free tier limits (checked 2026-11-21)
+- OpenWeather (free): 60 calls/minute, 1,000,000 calls/month. Current weather
+  and air pollution are included.
+- AQICN: default 1,000 requests/second, free for non-commercial use.
+  Rules: no caching or redistribution of data, attribution required.
+- Open-Meteo (free): non-commercial only, under 10,000 calls/day,
+  5,000/hour, 600/minute. Attribution required (CC-BY 4.0).
+- Hopsworks (free): 1 project, capped capacity, no credit card.
+  Exact storage: check my dashboard (sources disagree).
+- Groq (free): no credit card, limits depend on the model. Check the
+  Limits page in the Groq console.
+- Our usage: about 5 API calls per hour (about 120 per day), far below
+  every limit.
