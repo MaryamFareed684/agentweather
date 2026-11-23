@@ -196,6 +196,80 @@ def check_hourly_index(df):
         print(f"OK: {len(df)} rows, continuous hourly index, no duplicates")
 
     return ok
+# Rule for each column: (method, maximum hours we are willing to fill)
+# "ffill" = repeat the last known value. "zero" = assume no rain.
+IMPUTE_RULES = {
+    "temperature_c": ("ffill", 3),
+    "humidity_pct": ("ffill", 3),
+    "precipitation_mm": ("zero", 3),
+    "wind_speed_ms": ("ffill", 3),
+    "wind_direction_deg": ("ffill", 3),
+    "pressure_hpa": ("ffill", 3),
+    "cloud_cover_pct": ("ffill", 3),
+    "uv_index": ("ffill", 3),
+    "us_aqi": ("ffill", 3),
+    "pm2_5": ("ffill", 3),
+    "pm10": ("ffill", 3),
+}
+
+
+def gap_position(series):
+    """For each missing value, count how many hours into its gap it is.
+
+    In: a Series with some NaN.
+    Out: Series of numbers. 0 where the value exists, 1, 2, 3... inside a gap.
+    """
+    is_missing = series.isna()
+    run_id = (~is_missing).cumsum()
+    return is_missing.groupby(run_id).cumsum()
+
+
+def impute(df):
+    """Fill short gaps using only past values (no peeking into the future).
+
+    In: fused DataFrame (one row per hour).
+    Out: copy with short gaps filled, plus a '<column>_imputed' flag (1 or 0)
+         for every column in IMPUTE_RULES. Gaps longer than the limit stay NaN.
+    """
+    df = df.sort_values("time").reset_index(drop=True).copy()
+
+    for col, (method, limit) in IMPUTE_RULES.items():
+        if col not in df.columns:
+            continue
+
+        # Same type every time, so Hopsworks never sees int one day, float the next
+        df[col] = df[col].astype("float64")
+        was_missing = df[col].isna()
+
+        if method == "ffill":
+            df[col] = df[col].ffill(limit=limit)
+        elif method == "zero":
+            position = gap_position(df[col])
+            df.loc[was_missing & (position <= limit), col] = 0.0
+
+        df[f"{col}_imputed"] = (was_missing & df[col].notna()).astype(int)
+
+    return df
+
+
+def imputation_report(before, after):
+    """Make the table for docs/imputation.md.
+
+    In: DataFrame before impute() and after impute().
+    Out: DataFrame with column, % missing before, method, max gap, % missing after.
+    """
+    rows = []
+    for col, (method, limit) in IMPUTE_RULES.items():
+        if col not in before.columns:
+            continue
+        rows.append({
+            "column": col,
+            "missing_before_pct": round(100 * before[col].isna().mean(), 2),
+            "method": "forward fill" if method == "ffill" else "fill with 0",
+            "max_gap_filled_h": limit,
+            "missing_after_pct": round(100 * after[col].isna().mean(), 2),
+        })
+    return pd.DataFrame(rows)
 
 if __name__ == "__main__":
     # Quick test: about 45 days, so it crosses a month border (2 chunks).
