@@ -20,6 +20,7 @@ All timestamps are UTC, one row per hour. Column names are lowercase.
 | pm10 | µg/m³ | Open-Meteo air quality API | Coarse particles |
 | source | text | pipeline | Which source filled the weather columns |
 | ow_aqi_level | level 1-5 | OpenWeather (live only) | Extra check only, not a model input |
+Open-Meteo (requested in m/s)
 
 ## Fusion strategy
 

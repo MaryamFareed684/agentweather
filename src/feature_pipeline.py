@@ -131,6 +131,71 @@ def fetch_raw(mode, start_date=None, end_date=None):
 
     raise ValueError("mode must be 'backfill' or 'live'")
 
+TIME_DTYPE = "datetime64[ns, UTC]"
+
+
+def clean_hourly(df):
+    """Put one source on the hourly grid.
+
+    In: DataFrame with a 'time' column.
+    Out: copy with UTC times rounded down to the hour, sorted, one row per hour.
+    """
+    df = df.copy()
+    df["time"] = pd.to_datetime(df["time"], utc=True).dt.floor("h").astype(TIME_DTYPE)
+    df = df.sort_values("time").drop_duplicates(subset="time", keep="last")
+    return df
+
+
+def fuse(weather_df, air_df, start_date=None, end_date=None):
+    """Merge weather and air quality into exactly one row per hour.
+
+    In: weather_df, air_df, and optionally start and end date strings.
+    Out: DataFrame with a complete hourly 'time' column. Hours that no source
+         gave us stay as visible NaN (they are not dropped).
+    """
+    weather = clean_hourly(weather_df)
+    air = clean_hourly(air_df)
+
+    if start_date and end_date:
+        first = pd.Timestamp(start_date, tz="UTC")
+        last = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(hours=23)
+    else:
+        first = min(weather["time"].min(), air["time"].min())
+        last = max(weather["time"].max(), air["time"].max())
+
+    grid = pd.DataFrame({"time": pd.date_range(first, last, freq="h")})
+    grid["time"] = grid["time"].astype(TIME_DTYPE)
+
+    df = grid.merge(weather, on="time", how="left")
+    df = df.merge(air, on="time", how="left")
+    df["source"] = "open-meteo"
+
+    return df
+
+
+def check_hourly_index(df):
+    """Check that time is continuous, hourly and has no duplicates.
+
+    In: DataFrame with a 'time' column.
+    Out: True if all is fine, False otherwise (problems are printed).
+    """
+    ok = True
+
+    duplicates = int(df["time"].duplicated().sum())
+    if duplicates > 0:
+        print(f"PROBLEM: {duplicates} duplicate timestamps")
+        ok = False
+
+    steps = df["time"].diff().dropna()
+    bad_steps = int((steps != pd.Timedelta(hours=1)).sum())
+    if bad_steps > 0:
+        print(f"PROBLEM: {bad_steps} steps are not exactly 1 hour")
+        ok = False
+
+    if ok:
+        print(f"OK: {len(df)} rows, continuous hourly index, no duplicates")
+
+    return ok
 
 if __name__ == "__main__":
     # Quick test: about 45 days, so it crosses a month border (2 chunks).
@@ -140,8 +205,11 @@ if __name__ == "__main__":
     start = (today - timedelta(days=45)).isoformat()
 
     weather_df, air_df = fetch_raw("backfill", start, end)
+    df = fuse(weather_df, air_df, start, end)
 
-    print("\nWeather:", weather_df.shape)
-    print(weather_df.head(3))
-    print("\nAir quality:", air_df.shape)
-    print(air_df.head(3))
+    print("\nFused table:", df.shape)
+    print(df.dtypes)
+    print("\nMissing values per column:")
+    print(df.isna().sum())
+    print()
+    check_hourly_index(df)
