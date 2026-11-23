@@ -280,10 +280,25 @@ if __name__ == "__main__":
 
     weather_df, air_df = fetch_raw("backfill", start, end)
     df = fuse(weather_df, air_df, start, end)
-
-    print("\nFused table:", df.shape)
-    print(df.dtypes)
-    print("\nMissing values per column:")
-    print(df.isna().sum())
-    print()
     check_hourly_index(df)
+
+    # 1) Real data
+    clean = impute(df)
+    print("\nREAL DATA imputation report:")
+    print(imputation_report(df, clean).to_string(index=False))
+
+    # 2) Practice data: we make holes on purpose to see the rules work
+    test = df.copy()
+    for col in ["temperature_c", "precipitation_mm", "wind_direction_deg", "us_aqi"]:
+        test[col] = test[col].astype("float64")
+        test.loc[100, col] = float("nan")             # 1 hour gap
+        test.loc[200:202, col] = float("nan")         # 3 hour gap
+        test.loc[300:305, col] = float("nan")         # 6 hour gap
+    test_clean = impute(test)
+
+    print("\nPRACTICE DATA (holes made on purpose):")
+    print(imputation_report(test, test_clean).query(
+        "column in ['temperature_c','precipitation_mm','wind_direction_deg','us_aqi']"
+    ).to_string(index=False))
+    print("\nThe 6 hour gap (rows 300 to 305), temperature_c and its flag:")
+    print(test_clean.loc[298:307, ["time", "temperature_c", "temperature_c_imputed"]])
