@@ -5,6 +5,7 @@ Steps: fetch_raw -> fuse -> impute -> add_features -> add_targets -> store
 
 import time
 from datetime import datetime, timedelta, timezone
+import numpy as np
 
 import pandas as pd
 import requests
@@ -271,6 +272,154 @@ def imputation_report(before, after):
         })
     return pd.DataFrame(rows)
 
+# Columns we build history features from (lags, rolling means, changes)
+HISTORY_COLS = [
+    "temperature_c", "humidity_pct", "precipitation_mm", "wind_speed_ms",
+    "uv_index", "us_aqi", "pm2_5", "pressure_hpa",
+]
+LAGS = [1, 3, 6, 24]          # hours back
+ROLL_WINDOWS = [3, 6, 24]     # hours
+
+# target column -> the column it looks 24 hours ahead at
+TARGETS = {
+    "target_us_aqi_24h": "us_aqi",
+    "target_temperature_c_24h": "temperature_c",
+    "target_humidity_pct_24h": "humidity_pct",
+    "target_uv_index_24h": "uv_index",
+    "target_precipitation_mm_24h": "precipitation_mm",
+    "target_wind_speed_ms_24h": "wind_speed_ms",
+}
+TARGET_COLS = list(TARGETS) + [
+    "target_rain_24h", "target_wind_sin_24h", "target_wind_cos_24h",
+]
+
+
+def require_hourly_grid(df):
+    """Stop with an error if the table is not one row per hour.
+
+    shift() counts rows, so it only means 'hours' when every hour is present.
+    """
+    steps = df["time"].diff().dropna()
+    if not (steps == pd.Timedelta(hours=1)).all():
+        raise ValueError("Table is not a continuous hourly grid. Run fuse() first.")
+
+
+def add_time_features(df):
+    """Add hour, day, month, day of week and their sine/cosine versions.
+
+    In: DataFrame with a UTC 'time' column.
+    Out: copy with 8 new columns. They come from the timestamp only.
+    """
+    t = df["time"]
+    new = pd.DataFrame({
+        "hour": t.dt.hour,
+        "day": t.dt.day,
+        "month": t.dt.month,
+        "day_of_week": t.dt.dayofweek,
+        "hour_sin": np.sin(2 * np.pi * t.dt.hour / 24),
+        "hour_cos": np.cos(2 * np.pi * t.dt.hour / 24),
+        "month_sin": np.sin(2 * np.pi * t.dt.month / 12),
+        "month_cos": np.cos(2 * np.pi * t.dt.month / 12),
+    })
+    return pd.concat([df, new], axis=1)
+
+
+def add_wind_features(df):
+    """Turn wind direction (a circle) into sine and cosine.
+
+    In: DataFrame with 'wind_direction_deg'.
+    Out: copy with 'wind_dir_sin' and 'wind_dir_cos'. 359 and 1 degrees now
+         become almost the same numbers.
+    """
+    rad = np.deg2rad(df["wind_direction_deg"])
+    new = pd.DataFrame({"wind_dir_sin": np.sin(rad), "wind_dir_cos": np.cos(rad)})
+    return pd.concat([df, new], axis=1)
+
+
+def add_history_features(df):
+    """Add lag, rolling mean and rate-of-change features. Past values only.
+
+    In: imputed DataFrame (one row per hour).
+    Out: copy with lag (1, 3, 6, 24 h), rolling mean (3, 6, 24 h) and change
+         (1 h, 3 h) columns for each column in HISTORY_COLS, plus the rain sum
+         of the last 24 hours. A rolling window needs all its hours, so the
+         first 23 rows are NaN.
+    """
+    new = {}
+    for col in HISTORY_COLS:
+        s = df[col]
+        for k in LAGS:
+            new[f"{col}_lag{k}h"] = s.shift(k)
+        for w in ROLL_WINDOWS:
+            new[f"{col}_mean{w}h"] = s.rolling(w, min_periods=w).mean()
+        for k in (1, 3):
+            new[f"{col}_diff{k}h"] = s.diff(k)
+
+    new["precip_sum_24h"] = df["precipitation_mm"].rolling(24, min_periods=24).sum()
+    return pd.concat([df, pd.DataFrame(new)], axis=1)
+
+
+def add_features(df):
+    """Build all input features (time, wind, history).
+
+    In: imputed DataFrame (one row per hour).
+    Out: copy with the extra feature columns.
+    """
+    require_hourly_grid(df)
+    df = add_time_features(df)
+    df = add_wind_features(df)
+    df = add_history_features(df)
+    return df
+
+
+def add_targets(df):
+    """Add the 'what happens 24 hours later' columns.
+
+    In: imputed DataFrame (one row per hour).
+    Out: copy with 9 target columns. The last 24 rows have NaN targets
+         (the future has not happened yet). Keep them for forecasting only.
+    """
+    require_hourly_grid(df)
+
+    new = {}
+    for target, source in TARGETS.items():
+        new[target] = df[source].shift(-24)
+
+    rain_amount = new["target_precipitation_mm_24h"]
+    new["target_rain_24h"] = (rain_amount > 0.1).astype("float64").where(rain_amount.notna())
+
+    future_dir = np.deg2rad(df["wind_direction_deg"].shift(-24))
+    new["target_wind_sin_24h"] = np.sin(future_dir)
+    new["target_wind_cos_24h"] = np.cos(future_dir)
+
+    return pd.concat([df, pd.DataFrame(new)], axis=1)
+
+
+def leakage_check(df, n=500):
+    """Prove that features do not use the future.
+
+    We build features twice: once on the full table, once on a table cut off
+    after row n. If a feature at row n-1 changes, it was peeking at the future.
+
+    In: imputed DataFrame. Out: True if no leakage was found.
+    """
+    n = min(n, len(df) - 24)
+    full = add_features(df)
+    part = add_features(df.iloc[:n].copy())
+
+    new_cols = [c for c in full.columns if c not in df.columns]
+    a = full.loc[n - 1, new_cols].astype("float64").to_numpy()
+    b = part.loc[n - 1, new_cols].astype("float64").to_numpy()
+
+    same = np.isclose(a, b, equal_nan=True)
+    if same.all():
+        print(f"OK: no leakage found ({len(new_cols)} features checked)")
+        return True
+
+    bad = [c for c, ok in zip(new_cols, same) if not ok]
+    print("LEAKAGE in:", bad)
+    return False
+
 if __name__ == "__main__":
     # Quick test: about 45 days, so it crosses a month border (2 chunks).
     # The weather archive is a few days behind, so we stop 5 days ago.
@@ -282,23 +431,32 @@ if __name__ == "__main__":
     df = fuse(weather_df, air_df, start, end)
     check_hourly_index(df)
 
-    # 1) Real data
     clean = impute(df)
-    print("\nREAL DATA imputation report:")
-    print(imputation_report(df, clean).to_string(index=False))
+    print("\nImputed values (real data):", int(clean.filter(like="_imputed").sum().sum()))
 
-    # 2) Practice data: we make holes on purpose to see the rules work
-    test = df.copy()
-    for col in ["temperature_c", "precipitation_mm", "wind_direction_deg", "us_aqi"]:
-        test[col] = test[col].astype("float64")
-        test.loc[100, col] = float("nan")             # 1 hour gap
-        test.loc[200:202, col] = float("nan")         # 3 hour gap
-        test.loc[300:305, col] = float("nan")         # 6 hour gap
-    test_clean = impute(test)
+    features = add_targets(add_features(clean))
+    feature_cols = [c for c in features.columns
+                    if c not in clean.columns and c not in TARGET_COLS]
 
-    print("\nPRACTICE DATA (holes made on purpose):")
-    print(imputation_report(test, test_clean).query(
-        "column in ['temperature_c','precipitation_mm','wind_direction_deg','us_aqi']"
-    ).to_string(index=False))
-    print("\nThe 6 hour gap (rows 300 to 305), temperature_c and its flag:")
-    print(test_clean.loc[298:307, ["time", "temperature_c", "temperature_c_imputed"]])
+    print("\nTable with features and targets:", features.shape)
+    print("Features:", len(feature_cols), " Targets:", len(TARGET_COLS))
+
+    # Check 1: the 24 hour shift, by hand
+    i = 50
+    print("\nCHECK 1: target on paper")
+    print("Row", features.loc[i, "time"], "has target_temperature_c_24h =",
+          features.loc[i, "target_temperature_c_24h"])
+    print("Real temperature 24 h later at", features.loc[i + 24, "time"], "=",
+          features.loc[i + 24, "temperature_c"])
+
+    # Check 2: the last 24 rows must have no target
+    print("\nCHECK 2: last 24 rows have no target:",
+          bool(features.tail(24)[TARGET_COLS].isna().all().all()))
+
+    # Check 3: how many rows can be used for training
+    ready = features.dropna(subset=feature_cols + TARGET_COLS)
+    print("\nCHECK 3: rows ready for training:", len(ready), "of", len(features))
+
+    # Check 4: leakage test
+    print("\nCHECK 4: leakage test")
+    leakage_check(clean)
