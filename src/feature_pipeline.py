@@ -315,7 +315,7 @@ def add_time_features(df):
         "hour": t.dt.hour,
         "day": t.dt.day,
         "month": t.dt.month,
-        "day_of_week": t.dt.dayofweek,
+                "day_of_week": t.dt.day_of_week,
         "hour_sin": np.sin(2 * np.pi * t.dt.hour / 24),
         "hour_cos": np.cos(2 * np.pi * t.dt.hour / 24),
         "month_sin": np.sin(2 * np.pi * t.dt.month / 12),
