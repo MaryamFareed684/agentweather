@@ -420,6 +420,113 @@ def leakage_check(df, n=500):
     print("LEAKAGE in:", bad)
     return False
 
+
+# Hopsworks feature groups
+FG_RAW_NAME = "weather_observations"
+FG_FEATURES_NAME = "weather_features"
+FG_VERSION = 1
+TIME_TRAVEL_FORMAT = "HUDI"   # Delta needs a library that is not installed on Windows
+
+# Columns of the raw observation table (after fuse, before imputation)
+RAW_COLS = ["time"] + list(WEATHER_VARS.values()) + AIR_VARS + ["source"]
+
+
+def build_features(fused):
+    """Run imputation, features and targets in one go.
+
+    In: fused DataFrame (one row per hour).
+    Out: (features_df, feature_cols). features_df has the imputed columns,
+         flags, features and targets. feature_cols lists the new feature columns.
+    """
+    clean = impute(fused)
+    features = add_targets(add_features(clean))
+    feature_cols = [c for c in features.columns
+                    if c not in clean.columns and c not in TARGET_COLS]
+    return features, feature_cols
+
+
+def get_feature_store():
+    """Log in to Hopsworks with the key from .env and return the feature store."""
+    # Imported here, so the rest of the pipeline also works without Hopsworks
+    import os
+
+    import hopsworks
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    api_key = os.getenv("HOPSWORKS_API_KEY")
+    if not api_key:
+        raise RuntimeError("HOPSWORKS_API_KEY is missing in .env")
+
+    project = hopsworks.login(
+        api_key_value=api_key,
+        project=os.getenv("HOPSWORKS_PROJECT"),
+    )
+    return project.get_feature_store()
+
+
+def to_float(df):
+    """Make every number column float64, so the table has the same types every run.
+
+    In: DataFrame. Out: copy where all columns except 'time' and 'source' are float64.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if col not in ("time", "source"):
+            df[col] = df[col].astype("float64")
+    return df
+
+
+def store(observations_df, features_df, feature_cols):
+    """Save the data in two Hopsworks feature groups. Safe to run twice.
+
+    Both groups use 'time' as primary key and event time. If a row with the
+    same time already exists, Hopsworks updates it instead of adding a copy.
+
+    In: observations_df (RAW_COLS), features_df and feature_cols from build_features().
+    Out: (rows sent to the observation group, rows sent to the feature group).
+    """
+    fs = get_feature_store()
+
+    obs_fg = fs.get_or_create_feature_group(
+        name=FG_RAW_NAME,
+        version=FG_VERSION,
+        description="Hourly weather and air quality for Peshawar (UTC). "
+                    "Cleaned and fused, but not imputed or processed.",
+        primary_key=["time"],
+        event_time="time",
+        time_travel_format=TIME_TRAVEL_FORMAT,
+    )
+    feat_fg = fs.get_or_create_feature_group(
+        name=FG_FEATURES_NAME,
+        version=FG_VERSION,
+        description="Hourly features and 24-hour-ahead targets for Peshawar. "
+                    "The newest 24 rows have no target (forecasting only).",
+        primary_key=["time"],
+        event_time="time",
+        time_travel_format=TIME_TRAVEL_FORMAT,
+    )
+
+    obs = to_float(observations_df)
+
+    # Rows whose features are incomplete (the first 24 hours) are not stored.
+    feats = features_df.drop(columns=["source"]).dropna(subset=feature_cols)
+    feats = to_float(feats)
+
+    obs_fg.insert(obs, write_options={"wait_for_job": True})
+    feat_fg.insert(feats, write_options={"wait_for_job": True})
+
+    return len(obs), len(feats)
+
+
+def read_back(name):
+    """Read a whole feature group back from Hopsworks.
+
+    In: feature group name. Out: pandas DataFrame.
+    """
+    fs = get_feature_store()
+    return fs.get_feature_group(name, version=FG_VERSION).read()
+
 if __name__ == "__main__":
     # Quick test: about 45 days, so it crosses a month border (2 chunks).
     # The weather archive is a few days behind, so we stop 5 days ago.
