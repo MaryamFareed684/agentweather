@@ -4,6 +4,8 @@ Steps: fetch_raw -> fuse -> impute -> add_features -> add_targets -> store
 """
 
 import time
+import argparse
+import sys
 from datetime import datetime, timedelta, timezone
 import numpy as np
 
@@ -477,7 +479,7 @@ def to_float(df):
     return df
 
 
-def store(observations_df, features_df, feature_cols):
+def store(observations_df, features_df, feature_cols, wait=False):
     """Save the data in two Hopsworks feature groups. Safe to run twice.
 
     Both groups use 'time' as primary key and event time. If a row with the
@@ -513,8 +515,8 @@ def store(observations_df, features_df, feature_cols):
     feats = features_df.drop(columns=["source"]).dropna(subset=feature_cols)
     feats = to_float(feats)
 
-    obs_fg.insert(obs, write_options={"wait_for_job": True})
-    feat_fg.insert(feats, write_options={"wait_for_job": True})
+    obs_fg.insert(obs, write_options={"wait_for_job": wait})
+    feat_fg.insert(feats, write_options={"wait_for_job": wait})
 
     return len(obs), len(feats)
 
@@ -527,43 +529,78 @@ def read_back(name):
     fs = get_feature_store()
     return fs.get_feature_group(name, version=FG_VERSION).read()
 
+def run_backfill(start_date, end_date, dry_run=False, wait=False):
+    """Build and store features for a past date range (training data).
+
+    In: start and end date strings ('YYYY-MM-DD'), dry_run (do not store),
+        wait (wait for the Hopsworks jobs).
+    Out: nothing. Prints a summary.
+    """
+    # The weather archive is a few days behind, so we cannot go past that
+    latest = datetime.now(timezone.utc).date() - timedelta(days=5)
+    if pd.Timestamp(end_date).date() > latest:
+        print(f"Note: weather history only goes up to {latest}. Using it as the end date.")
+        end_date = latest.isoformat()
+
+    if pd.Timestamp(start_date) > pd.Timestamp(end_date):
+        sys.exit("The start date must be before the end date.")
+
+    # One extra day before the start, so the first rows have 24 hours of history.
+    # One extra day after the end (if it exists), so the last rows get their
+    # 24-hour-ahead target. Otherwise a small re-run would erase old targets.
+    first_day = (pd.Timestamp(start_date) - pd.Timedelta(days=1)).date().isoformat()
+    last_day = min((pd.Timestamp(end_date) + pd.Timedelta(days=1)).date(), latest)
+
+    weather_df, air_df = fetch_backfill(first_day, last_day.isoformat())
+    fused = fuse(weather_df, air_df, first_day, last_day.isoformat())
+    check_hourly_index(fused)
+    features, feature_cols = build_features(fused)
+
+    # Keep only the days that were asked for (drop the extra days)
+    start_ts = pd.Timestamp(start_date, tz="UTC")
+    stop_ts = pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)
+    keep = (fused["time"] >= start_ts) & (fused["time"] < stop_ts)
+    observations = fused.loc[keep, RAW_COLS]
+    features = features.loc[keep]
+
+    complete = features.dropna(subset=feature_cols)
+    with_target = complete.dropna(subset=TARGET_COLS)
+    print(f"\nRange: {start_date} to {end_date}")
+    print(f"Observation rows: {len(observations)}")
+    print(f"Feature rows (complete): {len(complete)}")
+    print(f"  of which have a target: {len(with_target)} "
+          "(only the newest 24 hours of the history have none)")
+
+    if dry_run:
+        print("\nDry run: nothing was stored in Hopsworks.")
+        return
+
+    store(observations, features, feature_cols, wait=wait)
+    print("\nData sent to Hopsworks.")
+    if not wait:
+        print("Hopsworks now processes it in background jobs (about 10 minutes each).")
+        print("Check the Jobs page, then run: python src/check_store.py")
+
+
+def parse_args():
+    """Read the command line options."""
+    parser = argparse.ArgumentParser(description="AgentWeather feature pipeline")
+    parser.add_argument("--mode", choices=["backfill", "live"], required=True)
+    parser.add_argument("--start", help="backfill start date, YYYY-MM-DD")
+    parser.add_argument("--end", help="backfill end date, YYYY-MM-DD")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="do everything except storing in Hopsworks")
+    parser.add_argument("--wait", action="store_true",
+                        help="wait until the Hopsworks jobs have finished")
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    # Quick test: about 45 days, so it crosses a month border (2 chunks).
-    # The weather archive is a few days behind, so we stop 5 days ago.
-    today = datetime.now(timezone.utc).date()
-    end = (today - timedelta(days=5)).isoformat()
-    start = (today - timedelta(days=45)).isoformat()
+    args = parse_args()
 
-    weather_df, air_df = fetch_raw("backfill", start, end)
-    df = fuse(weather_df, air_df, start, end)
-    check_hourly_index(df)
-
-    clean = impute(df)
-    print("\nImputed values (real data):", int(clean.filter(like="_imputed").sum().sum()))
-
-    features = add_targets(add_features(clean))
-    feature_cols = [c for c in features.columns
-                    if c not in clean.columns and c not in TARGET_COLS]
-
-    print("\nTable with features and targets:", features.shape)
-    print("Features:", len(feature_cols), " Targets:", len(TARGET_COLS))
-
-    # Check 1: the 24 hour shift, by hand
-    i = 50
-    print("\nCHECK 1: target on paper")
-    print("Row", features.loc[i, "time"], "has target_temperature_c_24h =",
-          features.loc[i, "target_temperature_c_24h"])
-    print("Real temperature 24 h later at", features.loc[i + 24, "time"], "=",
-          features.loc[i + 24, "temperature_c"])
-
-    # Check 2: the last 24 rows must have no target
-    print("\nCHECK 2: last 24 rows have no target:",
-          bool(features.tail(24)[TARGET_COLS].isna().all().all()))
-
-    # Check 3: how many rows can be used for training
-    ready = features.dropna(subset=feature_cols + TARGET_COLS)
-    print("\nCHECK 3: rows ready for training:", len(ready), "of", len(features))
-
-    # Check 4: leakage test
-    print("\nCHECK 4: leakage test")
-    leakage_check(clean)
+    if args.mode == "backfill":
+        if not (args.start and args.end):
+            sys.exit("Backfill needs --start and --end, for example: "
+                     "--mode backfill --start 2026-01-01 --end 2026-06-30")
+        run_backfill(args.start, args.end, dry_run=args.dry_run, wait=args.wait)
+    else:
+        print("Live mode comes in a later step.")
