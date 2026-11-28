@@ -426,7 +426,7 @@ def leakage_check(df, n=500):
 # Hopsworks feature groups
 FG_RAW_NAME = "weather_observations"
 FG_FEATURES_NAME = "weather_features"
-FG_VERSION = 1
+FG_VERSION = 2
 TIME_TRAVEL_FORMAT = "HUDI"   # Delta needs a library that is not installed on Windows
 
 # Columns of the raw observation table (after fuse, before imputation)
@@ -497,6 +497,7 @@ def store(observations_df, features_df, feature_cols, wait=False):
                     "Cleaned and fused, but not imputed or processed.",
         primary_key=["time"],
         event_time="time",
+                hudi_precombine_key="ingested_at",
         time_travel_format=TIME_TRAVEL_FORMAT,
     )
     feat_fg = fs.get_or_create_feature_group(
@@ -506,6 +507,7 @@ def store(observations_df, features_df, feature_cols, wait=False):
                     "The newest 24 rows have no target (forecasting only).",
         primary_key=["time"],
         event_time="time",
+                hudi_precombine_key="ingested_at",
         time_travel_format=TIME_TRAVEL_FORMAT,
     )
 
@@ -514,6 +516,10 @@ def store(observations_df, features_df, feature_cols, wait=False):
     # Rows whose features are incomplete (the first 24 hours) are not stored.
     feats = features_df.drop(columns=["source"]).dropna(subset=feature_cols)
     feats = to_float(feats)
+        # Upload time in seconds. Hopsworks compares it to decide which copy of a row wins.
+    ingested_at = int(time.time())
+    obs["ingested_at"] = ingested_at
+    feats["ingested_at"] = ingested_at
 
     obs_fg.insert(obs, write_options={"wait_for_job": wait})
     feat_fg.insert(feats, write_options={"wait_for_job": wait})
