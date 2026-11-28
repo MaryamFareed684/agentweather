@@ -63,3 +63,41 @@ docs/        Notes and answers
 ## Status
 - Week 1: done (setup, live fetch, 90-day history, first look at the data)
 - Week 2: feature pipeline, backfill, EDA (next)
+
+## Week 2: Feature pipeline
+
+`src/feature_pipeline.py` downloads weather and air quality from Open-Meteo,
+builds features and 24-hour-ahead targets, and stores them in Hopsworks
+(feature groups `weather_observations` and `weather_features`, version 2).
+
+### Setup
+
+1. Create a Hopsworks API key and save it in a `.env` file:
+   `HOPSWORKS_API_KEY=your_key_here` (the `.env` file is never committed).
+2. `pip install -r requirements.txt`
+
+### Backfill (history for training)
+
+```
+python src/feature_pipeline.py --mode backfill --start 2025-11-01 --end 2026-11-22
+```
+
+The weather archive is about 5 days behind, so the end date is cut to the latest available day.
+
+### Live (keeps the store fresh)
+
+```
+python src/feature_pipeline.py --mode live
+```
+
+Fetches the last 3 days (use `--past-days 7` to cover a longer gap), builds
+features and uploads them. Rows that already exist are updated, so older rows
+get their targets once 24 hours have passed. It is safe to run many times.
+
+Useful options: `--dry-run` (store nothing), `--wait` (wait for Hopsworks jobs).
+Check the stored data with `python src/check_store.py`.
+
+### Documents
+
+- `docs/data_schema.md`: columns, units and sources
+- `docs/imputation.md`: missing-value rules and results
