@@ -618,6 +618,44 @@ def run_backfill(start_date, end_date, dry_run=False, wait=False):
         print("Hopsworks now processes it in background jobs (about 10 minutes each).")
         print("Check the Jobs page, then run: python src/check_store.py")
 
+def run_live(past_days=LIVE_PAST_DAYS, dry_run=False, wait=False):
+    """Build and store features for the most recent hours (keeps the store fresh).
+
+    Downloads the last 'past_days' days up to now, builds features and targets,
+    and sends the whole window to Hopsworks. Rows that already exist are
+    updated, so older rows get their targets once 24 hours have passed.
+
+    In: past_days (how far back to fetch), dry_run (do not store),
+        wait (wait for the Hopsworks jobs).
+    Out: nothing. Prints a summary.
+    """
+    weather_df, air_df = fetch_live(past_days)
+    fused = fuse(weather_df, air_df)
+    check_hourly_index(fused)
+    features, feature_cols = build_features(fused)
+
+    observations = fused[RAW_COLS]
+    complete = features.dropna(subset=feature_cols)
+    with_target = complete.dropna(subset=TARGET_COLS)
+
+    print(f"\nLive window: {fused['time'].min()} to {fused['time'].max()}")
+    print(f"Observation rows: {len(observations)}")
+    print(f"Feature rows (complete): {len(complete)}")
+    print(f"  of which have a target: {len(with_target)}")
+    print(f"  newest feature row (input for forecasting): {complete['time'].max()}")
+
+    if complete.empty:
+        sys.exit("No complete feature rows. Use a larger --past-days.")
+
+    if dry_run:
+        print("\nDry run: nothing was stored in Hopsworks.")
+        return
+
+    store(observations, features, feature_cols, wait=wait)
+    print("\nLive data sent to Hopsworks.")
+    if not wait:
+        print("Hopsworks now processes it in a background job (a few minutes).")
+
 
 def parse_args():
     """Read the command line options."""
@@ -625,6 +663,8 @@ def parse_args():
     parser.add_argument("--mode", choices=["backfill", "live"], required=True)
     parser.add_argument("--start", help="backfill start date, YYYY-MM-DD")
     parser.add_argument("--end", help="backfill end date, YYYY-MM-DD")
+    parser.add_argument("--past-days", type=int, default=LIVE_PAST_DAYS,
+                        help="live mode: how many past days to fetch (default 3)")
     parser.add_argument("--dry-run", action="store_true",
                         help="do everything except storing in Hopsworks")
     parser.add_argument("--wait", action="store_true",
@@ -640,4 +680,4 @@ if __name__ == "__main__":
                      "--mode backfill --start 2026-01-01 --end 2026-06-30")
         run_backfill(args.start, args.end, dry_run=args.dry_run, wait=args.wait)
     else:
-        print("Live mode comes in a later step.")
+                run_live(args.past_days, dry_run=args.dry_run, wait=args.wait)
