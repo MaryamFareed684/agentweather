@@ -52,20 +52,23 @@ def month_chunks(start_date, end_date):
     return chunks
 
 
-def fetch_hourly(url, hourly_vars, start_date, end_date, extra_params=None):
-    """Download hourly data for one date range from an Open-Meteo API.
+def fetch_hourly(url, hourly_vars, start_date=None, end_date=None, extra_params=None):
+    """Download hourly data from an Open-Meteo API.
 
-    In: API url, list of variable names, start and end date strings.
+    In: API url, list of variable names, and optionally start and end date
+        strings. Without dates, the API's own default range is used
+        (extra_params can add 'past_days').
     Out: DataFrame with a UTC 'time' column, or raises an error after 3 tries.
     """
     params = {
         "latitude": LATITUDE,
         "longitude": LONGITUDE,
-        "start_date": start_date,
-        "end_date": end_date,
         "hourly": ",".join(hourly_vars),
         "timezone": "UTC",
     }
+    if start_date and end_date:
+        params["start_date"] = start_date
+        params["end_date"] = end_date
     if extra_params:
         params.update(extra_params)
 
@@ -86,7 +89,6 @@ def fetch_hourly(url, hourly_vars, start_date, end_date, extra_params=None):
             time.sleep(2 * attempt)
 
     raise RuntimeError(f"Could not fetch {start_date} to {end_date}: {last_error}")
-
 
 def fetch_backfill(start_date, end_date):
     """Download weather and air quality for a long range, month by month.
@@ -118,7 +120,36 @@ def fetch_backfill(start_date, end_date):
     weather_df = weather_df.rename(columns=WEATHER_VARS)
 
     return weather_df, air_df
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+LIVE_PAST_DAYS = 3
 
+
+def fetch_live(past_days=LIVE_PAST_DAYS):
+    """Download the most recent hours of weather and air quality.
+
+    Uses the forecast APIs with 'past_days'. They also return the rest of
+    today, but those hours are predictions and not measurements, so we cut
+    everything after the current hour.
+
+    In: how many past days to fetch.
+    Out: (weather_df, air_df) with schema names, up to the current hour (UTC).
+    """
+    extra = {"past_days": past_days, "forecast_days": 1}
+
+    weather = fetch_hourly(
+        FORECAST_URL,
+        list(WEATHER_VARS.keys()),
+        extra_params={**extra, "wind_speed_unit": "ms"},
+    )
+    air = fetch_hourly(AIR_URL, AIR_VARS, extra_params=extra)
+
+    weather = weather.rename(columns=WEATHER_VARS)
+
+    now_hour = pd.Timestamp.now(tz="UTC").floor("h")
+    weather = weather[weather["time"] <= now_hour]
+    air = air[air["time"] <= now_hour]
+
+    return weather, air
 
 def fetch_raw(mode, start_date=None, end_date=None):
     """Get raw data for the chosen mode.
@@ -130,7 +161,7 @@ def fetch_raw(mode, start_date=None, end_date=None):
         return fetch_backfill(start_date, end_date)
 
     if mode == "live":
-        raise NotImplementedError("Live mode comes in a later step.")
+        return fetch_live()
 
     raise ValueError("mode must be 'backfill' or 'live'")
 
